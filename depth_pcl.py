@@ -16,6 +16,7 @@ import matplotlib as mpl
 import matplotlib.cm as cm
 from GeometryExtractor import segmentor
 import open3d as o3d
+import cv2
 
 import torch
 from torchvision import transforms, datasets
@@ -29,10 +30,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Simple testing funtion for Monodepthv2 models.')
 
-    parser.add_argument('--image_path', type=str,
-                        help='path to a test image or folder of images', required=True)
+    parser.add_argument('--image_path', type=str, default="assets/test_image.jpg",
+                        help='path to a test image or folder of images')
     parser.add_argument('--model_name', type=str,
                         help='name of a pretrained model to use',
+                        default="mono+stereo_640x192",
                         choices=[
                             "mono_640x192",
                             "stereo_640x192",
@@ -146,14 +148,14 @@ def test_simple(args):
         print("Warning: The --pred_metric_depth flag only makes sense for stereo-trained KITTI "
               "models. For mono-trained models, output depths will not in metric space.")
 
-    download_model_if_doesnt_exist(args.model_name)
+    # download_model_if_doesnt_exist(args.model_name)
     model_path = os.path.join("models", args.model_name)
-    print("-> Loading model from ", model_path)
+    # print("-> Loading model from ", model_path)
     encoder_path = os.path.join(model_path, "encoder.pth")
     depth_decoder_path = os.path.join(model_path, "depth.pth")
 
     # LOADING PRETRAINED MODEL
-    print("   Loading pretrained encoder")
+    # print("   Loading pretrained encoder")
     encoder = networks.ResnetEncoder(18, False)
     loaded_dict_enc = torch.load(encoder_path, map_location=device)
 
@@ -165,7 +167,7 @@ def test_simple(args):
     encoder.to(device)
     encoder.eval()
 
-    print("   Loading pretrained decoder")
+    # print("   Loading pretrained decoder")
     depth_decoder = networks.DepthDecoder(
         num_ch_enc=encoder.num_ch_enc, scales=range(4))
 
@@ -187,7 +189,7 @@ def test_simple(args):
     else:
         raise Exception("Can not find args.image_path: {}".format(args.image_path))
 
-    print("-> Predicting on {:d} test images".format(len(paths)))
+    # print("-> Predicting on {:d} test images".format(len(paths)))
 
     # PREDICTING ON EACH IMAGE IN TURN
     seg = segmentor()
@@ -200,6 +202,7 @@ def test_simple(args):
 
             # Load image and preprocess
             original_image = pil.open(image_path).convert('RGB')
+            original_image.show()
             original_width, original_height = original_image.size
             color_image = original_image.resize((feed_width, feed_height), pil.LANCZOS)
             input_image = transforms.ToTensor()(color_image).unsqueeze(0)
@@ -225,6 +228,12 @@ def test_simple(args):
             colors = np.squeeze(np.array(color_image))/255.0
             colors = colors.reshape(-1,3)
 
+            # OG Pointcloud
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            o3d.visualization.draw_geometries([origin_frame, pcd])
+
             # Remove Ground
             # points, colors = RemoveGroundRansac(points, colors, seg, args.debug_pcl)
             points, colors = RemoveBackgroundManual(points, colors, background_thresh=10)
@@ -248,11 +257,12 @@ def test_simple(args):
             name_dest_im = os.path.join(output_directory, "{}_disp.jpeg".format(output_name))
             im.save(name_dest_im)
 
-            print("   Processed {:d} of {:d} images - saved predictions to:".format(
-                idx + 1, len(paths)))
-            print("   - {}".format(name_dest_im))
+            # print("   Processed {:d} of {:d} images - saved predictions to:".format(
+                # idx + 1, len(paths)))
+            # print("   - {}".format(name_dest_im))
 
     print('-> Done!')
+    original_image.close()
 
 if __name__ == '__main__':
     args = parse_args()

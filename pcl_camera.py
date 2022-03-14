@@ -15,6 +15,7 @@ import PIL.Image as pil
 import matplotlib as mpl
 import matplotlib.cm as cm
 import cv2
+import open3d as o3d
 
 import torch
 from torchvision import transforms, datasets
@@ -69,6 +70,52 @@ def draw_output(depth_map, max_percent=95, min_percent=0):
         depth_map)[:, :, :3][:, :, ::-1] * 255).astype(np.uint8)
 
     return colormapped_im[:, :, ::-1]
+
+def Generate3dGrid(depth_map):
+    ''' Similarity Triangle
+    We can obtain 3D pose through the ratio:
+    x_pixel/x_real = fx/depth
+    Camera Axes:
+        x: to right
+        y: to bottom
+        z: to front
+    '''
+    # TODO: Calibrate camera to get proper intrinsicss
+    # TODO: Get rid of floor planes
+    # TODO: Get 2d GRID MAP
+    z_real = np.squeeze(depth_map)
+    x_pixel = np.zeros_like(z_real)
+    for i in range(x_pixel.shape[1]):
+        x_pixel[:,i] = i
+    y_pixel = np.zeros_like(z_real)
+    for j in range(y_pixel.shape[0]):
+        y_pixel[j,:] = j
+    # From niantic/monodepth2 intrinsics
+    fx = 0.58*640
+    fy = 1.92*192
+    cx = 0.5*640
+    cy = 0.5*192
+    # From calib.txt in KITTI
+    # fx = 718.856
+    # fy = 718.856
+    # cx = 607.1928
+    # cy = 185.2157
+    x_real = np.squeeze((x_pixel-cx)*depth_map/fx)
+    y_real = np.squeeze((y_pixel-cy)*depth_map/fy)
+    return np.dstack([x_real, y_real, z_real]).reshape(-1,3)
+
+def RemoveBackgroundManual(points, colors, background_thresh=20):
+    crop_ind = np.argwhere(points[:,2] > background_thresh)
+    points = np.delete(points,crop_ind,axis=0) #Remove Floor plane from PointCloud
+    colors = np.delete(colors,crop_ind,axis=0) #Remove Floor plane from Color
+    return points, colors
+
+def RemoveGroundManual(points, colors):
+    crop_ind = np.argwhere(np.abs(points[:,1]-1.5) < 0.5)
+    points = np.delete(points,crop_ind,axis=0) #Remove Floor plane from PointCloud
+    colors = np.delete(colors,crop_ind,axis=0) #Remove Floor plane from Color
+    return points, colors
+
 
 def test_simple(args):
     """Function to predict for a single image or folder of images
@@ -130,15 +177,24 @@ def test_simple(args):
 
     # PREDICTING ON EACH IMAGE IN TURN
     cap = cv2.VideoCapture(0) #rb5 ip & port (same from command)
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+
+    # geometry is the point cloud used in your animaiton
+    pcd = o3d.geometry.PointCloud()
+    origin_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=3, origin=[0, 0, 0])
+    vis.add_geometry(pcd)
+    vis.add_geometry(origin_frame)
+
     with torch.no_grad():
         while(True):
             ret, original_frame = cap.read()
             original_width, original_height,_ = original_frame.shape
-            input_image = cv2.resize(original_frame, dsize=(feed_width, feed_height))
+            resized_image = cv2.resize(original_frame, dsize=(feed_width, feed_height))
 
             # Load image and preprocess
             # input_image = input_image.resize((feed_width, feed_height), pil.LANCZOS)
-            input_image = transforms.ToTensor()(input_image).unsqueeze(0)
+            input_image = transforms.ToTensor()(resized_image).unsqueeze(0)
 
             # PREDICTION
             input_image_device = input_image.to(device)
@@ -150,32 +206,36 @@ def test_simple(args):
                 disp, (original_height, original_width), mode="bilinear", align_corners=False)
 
             scaled_disp, depth = disp_to_depth(disp, 0.1, 100)
+            metric_depth = STEREO_SCALE_FACTOR * depth.cpu().numpy()
+
+            # Pass xyz to Open3D.o3d.geometry.PointCloud and visualize
+            points = Generate3dGrid(metric_depth)
+            colors = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
+            colors = colors/255.0
+            colors = colors.reshape(-1,3)
+
+            points, colors = RemoveBackgroundManual(points, colors, background_thresh=10)
+            points, colors = RemoveGroundManual(points, colors)
+
+            # OG Pointcloud
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            vis.update_geometry(pcd)
+            vis.poll_events()
+            vis.update_renderer()
 
             # Saving colormapped depth image
             disp_resized_np = disp_resized.squeeze().cpu().numpy()
             colormapped_im = draw_output(disp_resized_np)
-            # vmax = np.percentile(disp_resized_np, 95)
-            # normalizer = mpl.colors.Normalize(vmin=disp_resized_np.min(), vmax=vmax)
-            # mapper = cm.ScalarMappable(norm=normalizer, cmap='magma')
-            # colormapped_im = (mapper.to_rgba(disp_resized_np)[:, :, :3] * 255).astype(np.uint8)
-            # im = pil.fromarray(colormapped_im)
-            # print(original_frame)
-            # print(original_frame.shape)
             cv2.imshow("camera",np.asarray(original_frame))
             cv2.imshow("depth",colormapped_im)
             c = cv2.waitKey(1)
             if c == 27:
                 break
-            # name_dest_im = os.path.join(output_directory, "{}_disp.jpeg".format(output_name))
-            # im.save(name_dest_im)
-
-            # print("   Processed {:d} of {:d} images - saved predictions to:".format(
-            #     idx + 1, len(paths)))
-            # print("   - {}".format(name_dest_im))
-            # print("   - {}".format(name_dest_npy))
 
     cap.release()
     cv2.destroyAllWindows()
+    vis.destroy_window()
     print('-> Done!')
 
 
